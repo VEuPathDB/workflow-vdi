@@ -1,0 +1,91 @@
+#!/usr/bin/perl
+
+use strict;
+
+sub usage {
+
+  die "
+Compare tuning tables in a postgres database (sourceDB) with artifacts in VDI representing those tables, as tracked in an oracle database (workflowDB).  Output files indicating which artifacts are missing, out of date or obsolete.
+
+Usage: tuningTablesComparedToVdi sourceDB_config_file workflowDB_config_file needs_update_file needs_delete_file workflow_id <organism_abbrev>
+
+Where:
+ -sourceDB_config_file: a properties file with gus.config style db connect infor for sourceDB
+ -workflowDB_config_file: a properties file with gus.config style db connect infor for workflowDB
+ -workflow_id:  the reflow id for the workflow that is calling this program.  (Used for tracking only)
+ -organism_abbrev: (optional) if sourceDB is an orgDB, the organism_abbrev for that orgDB.  (Used for tracking only)
+
+Output:
+ -
+
+";
+  
+}
+
+=pod
+
+This program uses the new workflow VDI tables (above) to compare timestamps of TTs and TVs against those recorded for the most recent artifacts submitted to VDI (if any).
+
+It outputs:
+
+a two column needsUpdate.csv file containing TTs and TVs that are out-of-date.  Columns: 
+
+tuning_name
+
+last_modified
+
+a single column needsDelete.csv file containing TTs and TVs that need to be deleted from VDI.  Column:
+
+tuning_name
+
+The program does this:
+
+connect to workflowDB
+
+connect to orgDB
+
+from orgDB, stream a full list of TTs and TVs, and their timestamp (sorted by tuning name)
+
+from workflowDB, for this workflow_id and organism_abbrev, stream a list of VDI artifacts from control tables, including timestamp and completion status (sorted by artifact name)
+
+compare the streams.
+
+for TTs and TVs in VDI but not in orgDB:
+
+output to the needsDelete.csv file
+
+for TTs and TVs in orgDB and not in VDI:
+
+output to needsUpdate.csv file
+
+ for TTs and TVs in both orgDB and VDI:
+
+output to needsDelete.csv if:
+
+TT or TV has new timestamp
+
+output to needsUpdate.csv if:
+
+TT or TV has new timestamp
+
+VDI artifact is not complete
+
+=cut
+
+sub getDbHandle {
+  my ($instance, $username, $password, $schema) = @_;
+  my $props;
+
+  my $dsn = "dbi:Pg:" . $instance;
+  my $dbh = DBI->connect(
+    $dsn,
+    $username,
+    $password,
+    { PrintError => 1, RaiseError => 0}
+  ) or die "Can't connect to the database: $DBI::errstr\n";
+
+  print "db info:\n  dsn=$instance\n  login=$username\n\n" if $debug;
+  $dbh->do("SET search_path TO $schema") or die ("This doesn't quite work");
+  $dbh->do("SET ROLE GUS_W") or die ("Can't switch role to GUS_W");
+  return $dbh;
+}

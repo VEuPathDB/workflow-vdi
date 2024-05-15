@@ -11,8 +11,8 @@ my ($help, $fn, $gusConfig, $extDbName, $extDbVer);
 
 my ($sourceDbConfig, $workflowDbConfig, $needsSubmitFile, $needsDeleteFile, $workflowName, $workflowVersion, $orgAbbrev);
 
-&GetOptions('sourceDBconfig=s' => \$sourceDbConfig,
-	    'workflowDBconfig=s' => \$workflowDbConfig,
+&GetOptions('sourceDbConfig=s' => \$sourceDbConfig,
+	    'workflowDbConfig=s' => \$workflowDbConfig,
             'deletesOutputFile=s' => \$needsDeleteFile,
             'submitsOutputFile=s' => \$needsSubmitFile,
             'workflowName=s' => \$workflowName,
@@ -65,7 +65,7 @@ sub usage {
   die "
 Compare tuning tables in a postgres database (sourceDB) with artifacts in VDI representing those tables, as tracked in an oracle database (workflowDB).  Output files indicating which artifacts are missing, out of date or obsolete.
 
-Usage: tuningTablesComparedToVdi --sourceDBconfig file --workflowDBconfig file --deletesOutputFile file --updatesOutputFile file --workflowName name --workflowVersion version <--organismAbbrev orgAbbrev>
+Usage: tuningTablesComparedToVdi --sourceDbonfig file --workflowDbConfig file --deletesOutputFile file --updatesOutputFile file --workflowName name --workflowVersion version <--organismAbbrev orgAbbrev>
 
 Where:
  -sourceDBconfig: a properties file with gus.config style db connect infor for sourceDB

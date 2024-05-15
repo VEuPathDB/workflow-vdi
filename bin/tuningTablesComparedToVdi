@@ -7,14 +7,12 @@ use Getopt::Long;
 use DBI;
 use DBD::Oracle;
 
-use CBIL::Util::PropertySet;
-
 my ($help, $fn, $gusConfig, $extDbName, $extDbVer);
 
-my ($sourceDBConfig, $workflowDbConfig, $needsSubmitFile, $needsDeleteFile, $workflowName, $workflowVersion, $orgAbbrev);
+my ($sourceDbConfig, $workflowDbConfig, $needsSubmitFile, $needsDeleteFile, $workflowName, $workflowVersion, $orgAbbrev);
 
-&GetOptions('sourceDBconfig=s' => \$sourceDBConfig,
-	    'workflowDBconfig=s' => \$workflowDBConfig,
+&GetOptions('sourceDBconfig=s' => \$sourceDbConfig,
+	    'workflowDBconfig=s' => \$workflowDbConfig,
             'deletesOutputFile=s' => \$needsDeleteFile,
             'submitsOutputFile=s' => \$needsSubmitFile,
             'workflowName=s' => \$workflowName,
@@ -22,10 +20,10 @@ my ($sourceDBConfig, $workflowDbConfig, $needsSubmitFile, $needsDeleteFile, $wor
             'organismAbbrev:s' => \$orgAbbrev,  # optional
             );
 
-usage() unless ($sourceDBConfig && $workflowDbConfig && $needsSubmitFile && $needsDeleteFile && $workflowName && workflowVersion);
+usage() unless ($sourceDbConfig && $workflowDbConfig && $needsSubmitFile && $needsDeleteFile && $workflowName && $workflowVersion);
 
-my $sourceProps = readPropFile($sourceDBConfig);
-my $workflowProps = readPropFile($workflowDBConfig);
+my $sourceProps = readPropFile($sourceDbConfig);
+my $workflowProps = readPropFile($workflowDbConfig);
 
 my $sourceDbh = getDbHandle($sourceProps);
 my $workflowDbh = getDbHandle($workflowProps);
@@ -39,11 +37,11 @@ my $workflowStmt = getWorkflowStmt($workflowDbh, $workflowName, $workflowVersion
 open my $deleteFh, '>', $needsDeleteFile or die "Unable to open file '$needsDeleteFile': $!";
 open my $submitFh, '>', $needsSubmitFile or die "Unable to open file '$needsSubmitFile': $!";
 
-$worflowStmt->execute();
+$workflowStmt->execute();
 
 # iterate through VDI artifacts from workflowDb and compare to tuning tables in sourceDb
 # write to needsDelete or needsSumbit accordingly
-while (my ($name, $timestmp, $isComplete) = $stmt->fetchrow_array) {
+while (my ($name, $timestamp, $isComplete) = $workflowStmt->fetchrow_array) {
   if (!$tuningMap->{$name}) {
     # if not in tuningMap, push to delete file
     print $deleteFh "$name\n";
@@ -71,7 +69,7 @@ Usage: tuningTablesComparedToVdi --sourceDBconfig file --workflowDBconfig file -
 
 Where:
  -sourceDBconfig: a properties file with gus.config style db connect infor for sourceDB
- -workflowDBConfig: a properties file with gus.config style db connect infor for workflowDB
+ -workflowDbConfig: a properties file with gus.config style db connect infor for workflowDB
  -deletesOutputFile:  an output .csv file with a single column list of (tuning_name) to indicate out-of-date tuning tables or views that need to be deleted from VDI
  -submitsOutputFile:  an output .csv file with a two column list of (tuning_name,timestamp) to indicate tuning tables or views that need to be submitted to VDI.  The deletes should be processed before the submits, to ensure no duplicates.
  -workflowName:  the reflow name for the workflow that is calling this program.  (Used for tracking only)
@@ -93,17 +91,17 @@ sub readPropFile {
     my ($key, $value) = split /=/, $_, 2;
     $properties{$key} = $value;
   }
+  my $v = $properties{dbVendor};
+  die "No valid 'dbVendor' property found in file '$file'\n" unless $v eq 'Oracle' || $v eq 'Postgres';
+
   return \%properties;
 }
 
 
 sub getDbhandle {
   my ($props) = @_;
-  my $dbVendor = $props->{dbVendor};
-  die "No 'dbVendor' property found in file '$propFile'\n" unless $dbVendor;
-  return getOracleDbHandle($props) if ($dbVendor eq 'Oracle');
-  return getPgDbHandle($props) if ($dbVendor eq 'Postgres');
-  die "Did not find valid dbVendor in file '$propFile'\n";
+  my $dbVendor = $props->{dbVendor}; # validated to be oracle or pg
+  return ($dbVendor eq 'Oracle')? getOracleDbHandle($props) : getPgDbHandle($props);
 }
 
 sub getPgDbHandle {
@@ -156,14 +154,14 @@ sub getAllTuningTablesAndViews {
 
   # tuning name and timestamp in seconds since epoch
   my $timeSql = $dbVendor eq 'Oracle'?
-    "(timestamp - DATE '1970-01-01')*24*60*60 as ts"
+    "(timestamp - DATE '1970-01-01')*24*60*60 as ts" :
     "extract(epoch from timestamp) as ts";
-  my $sql = "name, $timeSql from apidb.tuningtable where status = 'up-to-date'" :
+  my $sql = "name, $timeSql from apidb.tuningtable where status = 'up-to-date'";
 
   my $stmt = $dbh->prepare($sql);
   $stmt->execute();
   my $tuningMap = {};
-  while (my ($name, $timestmp) = $stmt->fetchrow_array) {
+  while (my ($name, $timestamp) = $stmt->fetchrow_array) {
     $tuningMap->{$name} = $timestamp;
   }
   $stmt->close();
@@ -173,7 +171,7 @@ sub getAllTuningTablesAndViews {
 sub getWorkflowStmt {
   my ($workflowDbh, $workflowName, $workflowVersion, $orgAbbrev) = @_;
 
-  $orgAnd = $orgAbbrev? "and organism_abbrev = '$orgAbbrev'" : "";
+  my $orgAnd = $orgAbbrev? "and organism_abbrev = '$orgAbbrev'" : "";
   my $sql =
 "select artifact_name, artifact_timestamp, is_complete
 from apidb.WorkflowArtifactVdiId
@@ -182,5 +180,5 @@ and workflow_version = '$workflowVersion'
 $orgAnd
 ";
 
-  return $dbh->prepare($sql);
+  return $workflowDbh->prepare($sql);
 }

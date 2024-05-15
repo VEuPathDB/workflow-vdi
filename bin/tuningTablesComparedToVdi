@@ -2,90 +2,176 @@
 
 use strict;
 
+use Getopt::Long;
+
+use DBI;
+use DBD::Oracle;
+
+use CBIL::Util::PropertySet;
+
+my ($help, $fn, $gusConfig, $extDbName, $extDbVer);
+
+my ($sourceDBConfig, $workflowDbConfig, $needsSubmitFile, $needsDeleteFile, $workflowName, $workflowVersion, $orgAbbrev);
+
+&GetOptions('sourceDBconfig=s' => \$sourceDBConfig,
+	    'workflowDBconfig=s' => \$workflowDBConfig,
+            'deletesOutputFile=s' => \$needsDeleteFile,
+            'submitsOutputFile=s' => \$needsSubmitFile,
+            'workflowName=s' => \$workflowName,
+            'workflowVersion=s' => \$workflowVersion,
+            'organismAbbrev:s' => \$orgAbbrev,  # optional
+            );
+
+usage() unless ($sourceDBConfig && $workflowDbConfig && $needsSubmitFile && $needsDeleteFile && $workflowName && workflowVersion);
+
+my $sourceProps = readPropFile($sourceDBConfig);
+my $workflowProps = readPropFile($workflowDBConfig);
+
+my $sourceDbh = getDbHandle($sourceProps);
+my $workflowDbh = getDbHandle($workflowProps);
+
+# read into memory the list of sourceDb tuning tables and their timestamp.
+my $tuningMap = getAllTuningTablesAndViews($sourceDbh, $sourceProps->{dbVendor});  # hash from tuning name to timestamp
+
+# get stmt to query all artifacts in workflowDb
+my $workflowStmt = getWorkflowStmt($workflowDbh, $workflowName, $workflowVersion, $orgAbbrev);
+
+open my $deleteFh, '>', $needsDeleteFile or die "Unable to open file '$needsDeleteFile': $!";
+open my $submitFh, '>', $needsSubmitFile or die "Unable to open file '$needsSubmitFile': $!";
+
+$worflowStmt->execute();
+
+# iterate through VDI artifacts from workflowDb and compare to tuning tables in sourceDb
+# write to needsDelete or needsSumbit accordingly
+while (my ($name, $timestmp) = $stmt->fetchrow_array) {
+  if (!$tuningMap->{$name}) {
+    # if not in tuningMap, push to delete file
+    print $deleteFh "$name\n";
+  } else {
+    # if older than tuningMap, add to submit file
+    print $submitFh "$name, $timestamp\n" if $timestamp < $tuningMap->{$name};
+    $tuningMap->{name} = undef;   # remove because we found it
+  }
+}
+
+# any entries left in tuningMap are new and need to be submitted
+foreach my $name (keys %$tuningMap) {
+  print $submitFh "$name, $tuningMap->{$name}\n";
+}
+
+#############################################################################################################
+#############################################################################################################
+
 sub usage {
 
   die "
 Compare tuning tables in a postgres database (sourceDB) with artifacts in VDI representing those tables, as tracked in an oracle database (workflowDB).  Output files indicating which artifacts are missing, out of date or obsolete.
 
-Usage: tuningTablesComparedToVdi sourceDB_config_file workflowDB_config_file needs_update_file needs_delete_file workflow_id <organism_abbrev>
+Usage: tuningTablesComparedToVdi --sourceDBconfig file --workflowDBconfig file --deletesOutputFile file --updatesOutputFile file --workflowName name --workflowVersion version <--organismAbbrev orgAbbrev>
 
 Where:
- -sourceDB_config_file: a properties file with gus.config style db connect infor for sourceDB
- -workflowDB_config_file: a properties file with gus.config style db connect infor for workflowDB
- -workflow_id:  the reflow id for the workflow that is calling this program.  (Used for tracking only)
- -organism_abbrev: (optional) if sourceDB is an orgDB, the organism_abbrev for that orgDB.  (Used for tracking only)
-
-Output:
- -
-
+ -sourceDBconfig: a properties file with gus.config style db connect infor for sourceDB
+ -workflowDBConfig: a properties file with gus.config style db connect infor for workflowDB
+ -deletesOutputFile:  an output .csv file with a single column list of (tuning_name) to indicate out-of-date tuning tables or views that need to be deleted from VDI
+ -submitsOutputFile:  an output .csv file with a two column list of (tuning_name,timestamp) to indicate tuning tables or views that need to be submitted to VDI.  The deletes should be processed before the submits, to ensure no duplicates.
+ -workflowName:  the reflow name for the workflow that is calling this program.  (Used for tracking only)
+ -workflowVersion:  the reflow name for the workflow that is calling this program.  (Used for tracking only)
+ -organismAbbrev: (optional) if sourceDB is an orgDB, the organism_abbrev for that orgDB.  (Used for tracking only)
 ";
-  
 }
 
-=pod
+sub readPropFile {
+  my ($file) = @_;
 
-This program uses the new workflow VDI tables (above) to compare timestamps of TTs and TVs against those recorded for the most recent artifacts submitted to VDI (if any).
+  open my $fh, '<', $file or die "Unable to open property file '$file': $!";
 
-It outputs:
+  my %properties;
+  while (<$fh>) {
+    chomp;  # Remove newline character
+    next if /^\s*#/;  # Skip comments
+    next unless /\S/;  # Skip empty lines
+    my ($key, $value) = split /=/, $_, 2;
+    $properties{$key} = $value;
+  }
+  return \%properties;
+}
 
-a two column needsUpdate.csv file containing TTs and TVs that are out-of-date.  Columns: 
 
-tuning_name
+sub getDbhandle {
+  my ($props) = @_;
+  my $dbVendor = $props->{dbVendor};
+  die "No 'dbVendor' property found in file '$propFile'\n" unless $dbVendor;
+  return getOracleDbHandle($props) if ($dbVendor eq 'Oracle');
+  return getPgDbHandle($props) if ($dbVendor eq 'Postgres');
+  die "Did not find valid dbVendor in file '$propFile'\n";
+}
 
-last_modified
+sub getPgDbHandle {
+  my ($props) = @_;
 
-a single column needsDelete.csv file containing TTs and TVs that need to be deleted from VDI.  Column:
-
-tuning_name
-
-The program does this:
-
-connect to workflowDB
-
-connect to orgDB
-
-from orgDB, stream a full list of TTs and TVs, and their timestamp (sorted by tuning name)
-
-from workflowDB, for this workflow_id and organism_abbrev, stream a list of VDI artifacts from control tables, including timestamp and completion status (sorted by artifact name)
-
-compare the streams.
-
-for TTs and TVs in VDI but not in orgDB:
-
-output to the needsDelete.csv file
-
-for TTs and TVs in orgDB and not in VDI:
-
-output to needsUpdate.csv file
-
- for TTs and TVs in both orgDB and VDI:
-
-output to needsDelete.csv if:
-
-TT or TV has new timestamp
-
-output to needsUpdate.csv if:
-
-TT or TV has new timestamp
-
-VDI artifact is not complete
-
-=cut
-
-sub getDbHandle {
-  my ($instance, $username, $password, $schema) = @_;
-  my $props;
-
-  my $dsn = "dbi:Pg:" . $instance;
   my $dbh = DBI->connect(
-    $dsn,
-    $username,
-    $password,
+    $props->{dbiDsn},
+    $props->{databaseLogin},
+    $props->{databasePassword},
     { PrintError => 1, RaiseError => 0}
   ) or die "Can't connect to the database: $DBI::errstr\n";
 
-  print "db info:\n  dsn=$instance\n  login=$username\n\n" if $debug;
-  $dbh->do("SET search_path TO $schema") or die ("This doesn't quite work");
   $dbh->do("SET ROLE GUS_W") or die ("Can't switch role to GUS_W");
   return $dbh;
+}
+
+sub getOracleDbHandle {
+  my ($props) = @_;
+
+  my $dbh = DBI->connect(
+    $props->{dbiDsn},
+    $props->{databaseLogin},
+    $props->{databasePassword},
+    { PrintError => 1, RaiseError => 0}
+  ) or die "Can't connect to the database: $DBI::errstr\n";
+
+  return $dbh;
+}
+
+=pod
+Queries showing correctness of date to timestamp conversion in PG and oracle
+
+==POSTGRES==
+pfal3D7_test=> select TO_DATE('24/AUG/2023','dd/mon/yyyy'), extract(epoch from TO_DATE('24/AUG/2023','dd/mon/yyyy'));
+  to_date   |  extract   
+------------+------------
+ 2023-08-24 | 1692835200
+
+==Oracle==
+SQL> select TO_DATE('24/AUG/2023','dd/mon/yyyy') as dd, (TO_DATE('24/AUG/2023','dd/mon/yyyy') - DATE '1970-01-01')*24*60*60 as ts from dual;
+DD		  TS
+--------- ----------
+24-AUG-23 1692835200
+
+=cut
+
+# return map of up-to-date tuning tables in sourceDB to their timestamp
+sub getAllTuningTablesAndViews {
+  my ($dbh, $dbVendor) = @_;
+
+  # tuning name and timestamp in seconds since epoch
+  my $timeSql = $dbVendor eq 'Oracle'?
+    "(timestamp - DATE '1970-01-01')*24*60*60 as ts"
+    "extract(epoch from timestamp) as ts";
+  my $sql = "name, $timeSql from apidb.tuningtable where status = 'up-to-date'" :
+
+  my $stmt = $dbh->prepare($sql);
+  $stmt->execute();
+  my $tuningMap = {};
+  while (my ($name, $timestmp) = $stmt->fetchrow_array) {
+    $tuningMap->{$name} = $timestamp;
+  }
+  $stmt->close();
+  return $tuningMap;
+}
+
+sub getWorkflowStmt {
+  my ($workflowDbh, $workflowName, $workflowVersion, $orgAbbrev) = @_;
+
+  
 }

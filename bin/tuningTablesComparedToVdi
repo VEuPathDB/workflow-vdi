@@ -43,13 +43,13 @@ $worflowStmt->execute();
 
 # iterate through VDI artifacts from workflowDb and compare to tuning tables in sourceDb
 # write to needsDelete or needsSumbit accordingly
-while (my ($name, $timestmp) = $stmt->fetchrow_array) {
+while (my ($name, $timestmp, $isComplete) = $stmt->fetchrow_array) {
   if (!$tuningMap->{$name}) {
     # if not in tuningMap, push to delete file
     print $deleteFh "$name\n";
   } else {
-    # if older than tuningMap, add to submit file
-    print $submitFh "$name, $timestamp\n" if $timestamp < $tuningMap->{$name};
+    # if older than tuningMap, or not complete, add to submit file
+    print $submitFh "$name, $timestamp\n" if $timestamp < $tuningMap->{$name} || !$isComplete;
     $tuningMap->{name} = undef;   # remove because we found it
   }
 }
@@ -173,5 +173,14 @@ sub getAllTuningTablesAndViews {
 sub getWorkflowStmt {
   my ($workflowDbh, $workflowName, $workflowVersion, $orgAbbrev) = @_;
 
-  
+  $orgAnd = $orgAbbrev? "and organism_abbrev = '$orgAbbrev'" : "";
+  my $sql =
+"select artifact_name, artifact_timestamp, is_complete
+from apidb.WorkflowArtifactVdiId
+where workflow_name = '$workflowName'
+and workflow_version = '$workflowVersion'
+$orgAnd
+";
+
+  return $dbh->prepare($sql);
 }

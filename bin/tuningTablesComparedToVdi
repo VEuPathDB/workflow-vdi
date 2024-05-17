@@ -65,7 +65,7 @@ sub usage {
   die "
 Compare tuning tables in a postgres database (sourceDB) with artifacts in VDI representing those tables, as tracked in an oracle database (workflowDB).  Output files indicating which artifacts are missing, out of date or obsolete.
 
-Usage: tuningTablesComparedToVdi --sourceDbonfig file --workflowDbConfig file --deletesOutputFile file --updatesOutputFile file --workflowName name --workflowVersion version <--organismAbbrev orgAbbrev>
+Usage: tuningTablesComparedToVdi --sourceDbConfig file --workflowDbConfig file --deletesOutputFile file --submitsOutputFile file --workflowName name --workflowVersion version <--organismAbbrev orgAbbrev>
 
 Where:
  -sourceDBconfig: a properties file with gus.config style db connect infor for sourceDB
@@ -98,7 +98,7 @@ sub readPropFile {
 }
 
 
-sub getDbhandle {
+sub getDbHandle {
   my ($props) = @_;
   my $dbVendor = $props->{dbVendor}; # validated to be oracle or pg
   return ($dbVendor eq 'Oracle')? getOracleDbHandle($props) : getPgDbHandle($props);
@@ -155,8 +155,8 @@ sub getAllTuningTablesAndViews {
   # tuning name and timestamp in seconds since epoch
   my $timeSql = $dbVendor eq 'Oracle'?
     "(timestamp - DATE '1970-01-01')*24*60*60 as ts" :
-    "extract(epoch from timestamp) as ts";
-  my $sql = "name, $timeSql from apidb.tuningtable where status = 'up-to-date'";
+    "round(extract(epoch from timestamp)) as ts";
+  my $sql = "select name, $timeSql from apidb.tuningtable where status = 'up-to-date'";
 
   my $stmt = $dbh->prepare($sql);
   $stmt->execute();
@@ -164,7 +164,6 @@ sub getAllTuningTablesAndViews {
   while (my ($name, $timestamp) = $stmt->fetchrow_array) {
     $tuningMap->{$name} = $timestamp;
   }
-  $stmt->close();
   return $tuningMap;
 }
 

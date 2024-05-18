@@ -1,0 +1,216 @@
+#!/usr/bin/perl
+
+use strict;
+
+use Getopt::Long;
+
+use DBI;
+use DBD::Oracle;
+use JSON;
+
+my $DATA_FILE_NAME = 'data.tsv';
+my $META_FILE_NAME = 'meta.json';
+
+my ($sourceDbConfig, $needsSubmitFile, $workflowName, $workflowVersion, $orgAbbrev);
+
+&GetOptions('sourceDbConfig=s' => \$sourceDbConfig,
+            'toDumpFile=s' => \$toDumpFile,
+            'workflowName=s' => \$workflowName,
+            'workflowVersion=s' => \$workflowVersion,
+            'organismAbbrev:s' => \$orgAbbrev,  # optional
+            );
+
+usage() unless ($workflowDbConfig && $needsSubmitFile && $workflowName && $workflowVersion);
+
+my $sourceProps = readPropFile($sourceDbConfig);
+
+my $sourceDbh = getDbHandle($sourceProps);
+
+my $columnsStmt = getColumnsStmt($sourceDbh);
+my $timestampStmt = getTimestampStmt($sourceDbh);
+
+open my $fh, '<', $path_to_file || die "Can't open toDumpFile '$toDumpFile'\n";
+chomp(my @toDumpList = <$fh>);
+close $handle;
+
+my %tuningNames;
+foreach my $toDump (@toDumpList) {
+  my @c = split(/,\s*/);
+  die "Did not get the expected two comma-separated columns in '$toDumpFile': $toDump\n" unless scalar(@c) == 2;
+  my $name = $c[0];
+  die "Duplicate tuning table/view name '$name'\n" if $tuningNames{$name};
+  $tuningNames{$name} = 1;
+  dumpAndZipTuningThing($sourceDbh, $columnsStmt, $timestampStmt, $name);
+}
+
+###############################################################################################################
+###############################################################################################################
+
+
+sub usage {
+
+  die "
+Dump tuning tables as VDI artifacts.  Use the provided --toDumpFile to get list of tuning tables to dump.  Output data and metadata.
+
+Usage: tuningTablesToArtifacts --sourceDbConfig file --toDumpFile file --workflowName name --workflowVersion version <--organismAbbrev orgAbbrev>
+
+Where:
+ -sourceDbconfig: a properties file with gus.config style db connect infor for sourceDB
+ -toDumpFile:  a .csv file with a two column list of (tuning_name,timestamp) to indicate tuning tables or views that need to be dumped as artifacts.
+ -workflowName:  the reflow name for the workflow that is calling this program.  (Used for tracking only)
+ -workflowVersion:  the reflow name for the workflow that is calling this program.  (Used for tracking only)
+ -organismAbbrev: (optional) if sourceDB is an orgDB, the organism_abbrev for that orgDB.  (Used for tracking only)
+
+Outputs a TUNING_NAME.zip file in the cwd, containing:
+ - data.tsv
+ - meta.json manifest, including fields:
+    - type: the VDI type for this artifact
+    - name: eg the tuning table name
+    - timestamp: numeric timestamp
+    - columns: an ordered list column names for data.tsv
+";
+}
+
+sub readPropFile {
+  my ($file) = @_;
+
+  open my $fh, '<', $file or die "Unable to open property file '$file': $!";
+
+  my %properties;
+  while (<$fh>) {
+    chomp;  # Remove newline character
+    next if /^\s*#/;  # Skip comments
+    next unless /\S/;  # Skip empty lines
+    my ($key, $value) = split /=/, $_, 2;
+    $properties{$key} = $value;
+  }
+  my $v = $properties{dbVendor};
+  die "No valid 'dbVendor' property found in file '$file'\n" unless $v eq 'Oracle' || $v eq 'Postgres';
+
+  return \%properties;
+}
+
+
+sub getDbhandle {
+  my ($props) = @_;
+  my $dbVendor = $props->{dbVendor}; # validated to be oracle or pg
+  return ($dbVendor eq 'Oracle')? getOracleDbHandle($props) : getPgDbHandle($props);
+}
+
+sub getPgDbHandle {
+  my ($props) = @_;
+
+  my $dbh = DBI->connect(
+    $props->{dbiDsn},
+    $props->{databaseLogin},
+    $props->{databasePassword},
+    { PrintError => 1, RaiseError => 0}
+  ) or die "Can't connect to the database: $DBI::errstr\n";
+
+  $dbh->do("SET ROLE GUS_W") or die ("Can't switch role to GUS_W");
+  return $dbh;
+}
+
+sub getOracleDbHandle {
+  my ($props) = @_;
+
+  my $dbh = DBI->connect(
+    $props->{dbiDsn},
+    $props->{databaseLogin},
+    $props->{databasePassword},
+    { PrintError => 1, RaiseError => 0}
+  ) or die "Can't connect to the database: $DBI::errstr\n";
+
+  return $dbh;
+}
+
+sub getColumnsStmt {
+  my ($dbh) = @_;
+
+  my $sql =
+"SELECT column_name, data_type
+FROM information_schema.columns
+WHERE lower(table_schema) = ?
+AND lower(table_name) = ?";
+
+  return $dbh->prepare($sql);
+}
+
+sub getTimestampStmt {
+  my ($dbh) = @_;
+
+  # tuning name and timestamp in seconds since epoch
+  my $timeSql = $dbVendor eq 'Oracle'?
+    "(timestamp - DATE '1970-01-01')*24*60*60 as ts" :
+    "round(extract(epoch from timestamp)) as ts";
+  my $sql = "select $timeSql from apidb.tuningtable where status = 'up-to-date' and name = ?";
+
+  return $dbh->prepare($sql);
+}
+
+sub dumpAndZipTuningThing{
+  my ($dbh, $columnsStmt, $timestampStmt, $name) = @_;
+
+  print STDERR "Dumping $name\n";
+  $name ~= /(\w+)\.(\w+)/ || die "Tuning name '$name' is not in the form 'schema.table'\n";
+  my $schema = $1;
+  my $table = $2;
+  my $columns = getColumns($columnsStmt, $schema, $table);
+  my $timestamp = getTimestamp($timestampStmt, $name);  # get fresh timestamp, because might be later than provided in input file
+  dumpData($dbh, $name, $DATA_FILE_NAME);
+  writeMeta($name, $timestamp, $columns);
+  my $cmd = "zip -m $name.zip $META_FILE_NAME $DATA_FILE_NAME";
+  system($cmd) && die "Failed running cmd '$cmd': $!";
+}
+
+sub getColumns {
+  my ($stmt, $schema, $table) = @_;
+
+  $stmt->execute($schema, $table);
+  my $columns = [];
+  while (my ($col, $type) = $stmt->fetchrow_array()) {
+    push(@$columns, [$col, $type]);
+  }
+  return $columns;
+}
+
+sub getTimestamp {
+  my ($stmt, $name) = @_;
+  $stmt->execute($name);
+  my ($timestamp) = $stmt->fetchrow_array();
+  return $timestamp;
+}
+
+sub writeMeta {
+  my ($name, $timestamp, $columns) = @_;
+
+  my $meta = {};
+  $meta->{type} = 'tuningtable';
+  $meta->{name} = $name;
+  $meta->{timestamp} = $timestamp;
+  $meta->{columns} = $columns;
+  my $jsonString = encode_json($meta);
+  open(FH, '>', $META_FILE_NAME) or die $!;
+  print FH $jsonString;
+  close(FH);
+}
+
+sub dumpData {
+  my ($dbh, $name, $columns, $DATA_FILE_NAME) = @_;
+
+  open(FILE, ">", $DATA_FILE_NAME) or die "Cannot open file $DATA_FILE_NAME for writing: $!";
+
+  my $colsString = join(',', @$columns);
+
+  my $sql = "select $colsString from $name";  # $name includes schema
+
+  my $sh = $dbh->prepare($sql);
+  $sh->execute();
+
+  while(my @a = $sh->fetchrow_array) {
+    print FILE join("\t", @a) . "\n";
+  }
+  $sh->finish();
+  close FILE;
+}
+

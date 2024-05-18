@@ -7,8 +7,6 @@ use Getopt::Long;
 use DBI;
 use DBD::Oracle;
 
-my ($help, $fn, $gusConfig, $extDbName, $extDbVer);
-
 my ($sourceDbConfig, $workflowDbConfig, $needsSubmitFile, $needsDeleteFile, $workflowName, $workflowVersion, $orgAbbrev);
 
 &GetOptions('sourceDbConfig=s' => \$sourceDbConfig,

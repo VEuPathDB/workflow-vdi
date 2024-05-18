@@ -11,7 +11,7 @@ use JSON;
 my $DATA_FILE_NAME = 'data.tsv';
 my $META_FILE_NAME = 'meta.json';
 
-my ($sourceDbConfig, $needsSubmitFile, $workflowName, $workflowVersion, $orgAbbrev);
+my ($sourceDbConfig, $toDumpFile, $workflowName, $workflowVersion, $orgAbbrev);
 
 &GetOptions('sourceDbConfig=s' => \$sourceDbConfig,
             'toDumpFile=s' => \$toDumpFile,
@@ -20,28 +20,30 @@ my ($sourceDbConfig, $needsSubmitFile, $workflowName, $workflowVersion, $orgAbbr
             'organismAbbrev:s' => \$orgAbbrev,  # optional
             );
 
-usage() unless ($workflowDbConfig && $needsSubmitFile && $workflowName && $workflowVersion);
+usage() unless ($sourceDbConfig && $toDumpFile && $workflowName && $workflowVersion);
 
 my $sourceProps = readPropFile($sourceDbConfig);
 
 my $sourceDbh = getDbHandle($sourceProps);
 
 my $columnsStmt = getColumnsStmt($sourceDbh);
-my $timestampStmt = getTimestampStmt($sourceDbh);
+my $timestampStmt = getTimestampStmt($sourceDbh, $sourceProps->{dbVendor});
 
-open my $fh, '<', $path_to_file || die "Can't open toDumpFile '$toDumpFile'\n";
+open my $fh, '<', $toDumpFile || die "Can't open toDumpFile '$toDumpFile'\n";
 chomp(my @toDumpList = <$fh>);
-close $handle;
+close $fh;
 
 my %tuningNames;
 foreach my $toDump (@toDumpList) {
-  my @c = split(/,\s*/);
+  my @c = split(/,\s*/, $toDump);
   die "Did not get the expected two comma-separated columns in '$toDumpFile': $toDump\n" unless scalar(@c) == 2;
   my $name = $c[0];
   die "Duplicate tuning table/view name '$name'\n" if $tuningNames{$name};
   $tuningNames{$name} = 1;
+  print STDERR "Dumping $name\n";
   dumpAndZipTuningThing($sourceDbh, $columnsStmt, $timestampStmt, $name);
 }
+print STDERR "DONE\n";
 
 ###############################################################################################################
 ###############################################################################################################
@@ -55,7 +57,7 @@ Dump tuning tables as VDI artifacts.  Use the provided --toDumpFile to get list 
 Usage: tuningTablesToArtifacts --sourceDbConfig file --toDumpFile file --workflowName name --workflowVersion version <--organismAbbrev orgAbbrev>
 
 Where:
- -sourceDbconfig: a properties file with gus.config style db connect infor for sourceDB
+ -sourceDbConfig: a properties file with gus.config style db connect infor for sourceDB
  -toDumpFile:  a .csv file with a two column list of (tuning_name,timestamp) to indicate tuning tables or views that need to be dumped as artifacts.
  -workflowName:  the reflow name for the workflow that is calling this program.  (Used for tracking only)
  -workflowVersion:  the reflow name for the workflow that is calling this program.  (Used for tracking only)
@@ -91,7 +93,7 @@ sub readPropFile {
 }
 
 
-sub getDbhandle {
+sub getDbHandle {
   my ($props) = @_;
   my $dbVendor = $props->{dbVendor}; # validated to be oracle or pg
   return ($dbVendor eq 'Oracle')? getOracleDbHandle($props) : getPgDbHandle($props);
@@ -130,14 +132,14 @@ sub getColumnsStmt {
   my $sql =
 "SELECT column_name, data_type
 FROM information_schema.columns
-WHERE lower(table_schema) = ?
-AND lower(table_name) = ?";
+WHERE lower(table_schema) = lower(?)
+AND lower(table_name) = lower(?)";
 
   return $dbh->prepare($sql);
 }
 
 sub getTimestampStmt {
-  my ($dbh) = @_;
+  my ($dbh, $dbVendor) = @_;
 
   # tuning name and timestamp in seconds since epoch
   my $timeSql = $dbVendor eq 'Oracle'?
@@ -151,15 +153,14 @@ sub getTimestampStmt {
 sub dumpAndZipTuningThing{
   my ($dbh, $columnsStmt, $timestampStmt, $name) = @_;
 
-  print STDERR "Dumping $name\n";
-  $name ~= /(\w+)\.(\w+)/ || die "Tuning name '$name' is not in the form 'schema.table'\n";
+  $name =~ /(\w+)\.(\w+)/ || die "Tuning name '$name' is not in the form 'schema.table'\n";
   my $schema = $1;
   my $table = $2;
   my $columns = getColumns($columnsStmt, $schema, $table);
   my $timestamp = getTimestamp($timestampStmt, $name);  # get fresh timestamp, because might be later than provided in input file
-  dumpData($dbh, $name, $DATA_FILE_NAME);
+  dumpData($dbh, $name, $columns);
   writeMeta($name, $timestamp, $columns);
-  my $cmd = "zip -m $name.zip $META_FILE_NAME $DATA_FILE_NAME";
+  my $cmd = "zip -q -m $name.zip $META_FILE_NAME $DATA_FILE_NAME";
   system($cmd) && die "Failed running cmd '$cmd': $!";
 }
 
@@ -196,11 +197,11 @@ sub writeMeta {
 }
 
 sub dumpData {
-  my ($dbh, $name, $columns, $DATA_FILE_NAME) = @_;
+  my ($dbh, $name, $columns) = @_;
 
   open(FILE, ">", $DATA_FILE_NAME) or die "Cannot open file $DATA_FILE_NAME for writing: $!";
 
-  my $colsString = join(',', @$columns);
+  my $colsString = join(',', map {$_->[0]} @$columns);
 
   my $sql = "select $colsString from $name";  # $name includes schema
 
